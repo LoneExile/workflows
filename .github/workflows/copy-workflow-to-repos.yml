@@ -1,0 +1,183 @@
+name: Copy Workflow to Repos
+
+on:
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: "Comma/whitespace-separated repo names (repo or owner/repo)"
+        required: true
+        type: string
+      target_path:
+        description: "Target path in repo (default: .github/workflows/self-scan.yml)"
+        required: false
+        default: ".github/workflows/self-scan.yml"
+        type: string
+      pr_title:
+        description: "PR title"
+        required: false
+        default: "chore: add security scan workflow"
+        type: string
+      pr_body:
+        description: "PR body"
+        required: false
+        default: "Adds automated security scanning workflow with gitleaks."
+        type: string
+      dry_run:
+        description: "If true, only list actions without creating PRs"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  copy-workflow:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+
+      - name: Copy workflow to target repos
+        uses: actions/github-script@v7
+        env:
+          REPOS: ${{ inputs.repos }}
+          TARGET_PATH: ${{ inputs.target_path }}
+          PR_TITLE: ${{ inputs.pr_title }}
+          PR_BODY: ${{ inputs.pr_body }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const { execSync } = require('child_process');
+
+            const currentOrg = context.repo.owner;
+            
+            const wfInputs = (context.payload && context.payload.inputs) || {};
+            const read = (k, d='') => (wfInputs[k] ?? process.env[k.toUpperCase()] ?? d);
+
+            const splitList = (s) => String(s || '')
+              .split(/[\s,]+/)
+              .map(x => x.trim())
+              .filter(Boolean);
+
+            const repoList = splitList(read('repos', ''));
+            const targetPath = read('target_path', '.github/workflows/self-scan.yml');
+            const prTitle = read('pr_title', 'chore: add security scan workflow');
+            const prBody = read('pr_body', 'Adds automated security scanning workflow with gitleaks.');
+            const dryRun = String(read('dry_run', 'false')) === 'true';
+
+            if (!repoList.length) {
+              core.setFailed('No repos specified');
+              process.exit(1);
+            }
+
+            // Read the source workflow file
+            const sourceFile = '.github/workflows/self-scan.yml';
+            if (!fs.existsSync(sourceFile)) {
+              core.setFailed(`Source file ${sourceFile} not found`);
+              process.exit(1);
+            }
+            const workflowContent = fs.readFileSync(sourceFile, 'utf8');
+
+            const normalise = (arr) => arr.map(x => {
+              const lower = x.toLowerCase();
+              const p = lower.split('/');
+              if (p.length === 2) return { owner: p[0], name: p[1], full: lower };
+              return { owner: currentOrg.toLowerCase(), name: lower, full: `${currentOrg.toLowerCase()}/${lower}` };
+            });
+
+            const repos = normalise(repoList);
+
+            await core.summary
+              .addHeading('Copy Workflow Configuration', 2)
+              .addList([
+                `Target repos: ${repos.map(r=>r.full).join(', ')}`,
+                `Target path: ${targetPath}`,
+                `Dry run: ${dryRun}`
+              ])
+              .write();
+
+            const results = [];
+
+            for (const r of repos) {
+              const owner = r.owner;
+              const repo = r.name;
+
+              try {
+                const repoData = await github.rest.repos.get({ owner, repo });
+                const base = repoData.data.default_branch || 'main';
+
+                const ts = new Date().toISOString().replace(/[:.]/g,'-');
+                const branch = `chore/add-security-workflow-${ts}`;
+                const tmpDir = `/tmp/copy-workflow-${repo}-${ts}`;
+
+                if (dryRun) {
+                  results.push({ repo: r.full, status: 'would-create-pr', branch, base });
+                  continue;
+                }
+
+                // Clone the target repo
+                execSync(`git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${owner}/${repo}.git ${tmpDir}`, { stdio: 'inherit' });
+                process.chdir(tmpDir);
+
+                // Create new branch
+                execSync(`git checkout -b ${branch}`);
+                
+                // Create target directory if needed
+                const targetDir = path.dirname(targetPath);
+                if (targetDir && targetDir !== '.') {
+                  execSync(`mkdir -p ${targetDir}`);
+                }
+
+                // Write the workflow file
+                fs.writeFileSync(targetPath, workflowContent);
+                
+                // Commit and push
+                execSync(`git add ${targetPath}`);
+                execSync(`git config user.name "github-actions[bot]"`);
+                execSync(`git config user.email "github-actions[bot]@users.noreply.github.com"`);
+                execSync(`git commit -m "${prTitle}"`);
+                execSync(`git push origin ${branch}`);
+
+                // Create PR
+                const pr = await github.rest.pulls.create({
+                  owner,
+                  repo,
+                  title: prTitle,
+                  head: branch,
+                  base,
+                  body: `${prBody}\n\nAdded workflow file: \`${targetPath}\``
+                });
+
+                results.push({ repo: r.full, status: 'pr-created', pr: pr.data.html_url });
+
+                // Cleanup
+                execSync(`rm -rf ${tmpDir}`);
+
+              } catch (e) {
+                const msg = e?.message?.split('\n')[0] || String(e);
+                results.push({ repo: r.full, status: 'error', message: msg });
+              }
+            }
+
+            const created = results.filter(r => r.status === 'pr-created').length;
+            const would = results.filter(r => r.status === 'would-create-pr').length;
+            const errors = results.filter(r => r.status === 'error').length;
+
+            await core.summary
+              .addHeading('Copy Results')
+              .addTable([
+                [{data:'Repo',header:true},{data:'Status',header:true},{data:'Details',header:true}],
+                ...results.map(r => [r.repo, r.status, r.pr || r.message || ''])
+              ])
+              .addRaw(`\nPRs Created: ${created}  |  Dry-run: ${would}  |  Errors: ${errors}\n`)
+              .write();
+
+            if (errors > 0) {
+              core.setFailed(`Failed to process ${errors} repo(s)`);
+            }
