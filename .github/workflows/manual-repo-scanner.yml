@@ -40,9 +40,17 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
+      - name: Generate GitHub App Token
+        id: generate-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Setup git config
         run: |
-          git config --global url."https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/mtl-digitaltech/".insteadOf "https://github.com/mtl-digitaltech/"
+          git config --global url."https://x-access-token:${{ steps.generate-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -64,13 +72,11 @@ jobs:
           PR_BODY: ${{ inputs.pr_body }}
           DRY_RUN: ${{ inputs.dry_run }}
         with:
-          github-token: ${{ secrets.PAT_TOKEN }}
+          github-token: ${{ steps.generate-token.outputs.token }}
           script: |
             const fs = require('fs');
             const path = require('path');
             const { execSync } = require('child_process');
-
-            const org = 'mtl-digitaltech';
 
             const wfInputs = (context.payload && context.payload.inputs) || {};
             const read = (k, d='') => (wfInputs[k] ?? process.env[k.toUpperCase()] ?? d);
@@ -95,7 +101,7 @@ jobs:
               const lower = x.toLowerCase();
               const p = lower.split('/');
               if (p.length === 2) return { owner: p[0], name: p[1], full: lower };
-              return { owner: org.toLowerCase(), name: lower, full: `${org.toLowerCase()}/${lower}` };
+              return { owner: context.repo.owner.toLowerCase(), name: lower, full: `${context.repo.owner.toLowerCase()}/${lower}` };
             });
 
             const repos = normalise(repoList);
@@ -128,7 +134,7 @@ jobs:
                   continue;
                 }
 
-                execSync(`git clone https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/${owner}/${repo}.git ${tmpDir}`, { stdio: 'inherit' });
+                execSync(`git clone https://x-access-token:${{ steps.generate-token.outputs.token }}@github.com/${owner}/${repo}.git ${tmpDir}`, { stdio: 'inherit' });
                 process.chdir(tmpDir);
 
                 let scanResults = '';
