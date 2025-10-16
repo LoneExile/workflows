@@ -44,16 +44,6 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/create-github-app-token@v2
-        id: app-token
-        with:
-          app-id: ${{ secrets.GITLEAKSCAN_ID }}
-          private-key: ${{ secrets.GITLEAKSCAN_PRIVATE_KEY }}
-
-      - name: Setup git config
-        run: |
-          git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/mtl-digitaltech/".insteadOf "https://github.com/mtl-digitaltech/"
-
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -67,7 +57,7 @@ jobs:
           PR_BODY: ${{ inputs.pr_body }}
           DRY_RUN: ${{ inputs.dry_run }}
         with:
-          github-token: ${{ steps.app-token.outputs.token }}
+          github-token: ${{ secrets.PAT_TOKEN }}
           script: |
             const fs = require('fs');
             const path = require('path');
