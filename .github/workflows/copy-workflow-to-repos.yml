@@ -30,13 +30,19 @@ on:
         options: ["true", "false"]
 
 permissions:
+  id-token: write
   contents: read
   pull-requests: write
+  issues: write
 
 jobs:
   copy-workflow:
     runs-on: ubuntu-latest
     steps:
+      - name: Setup git config
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
       - name: Checkout source repo
         uses: actions/checkout@v4
 
@@ -49,7 +55,7 @@ jobs:
           PR_BODY: ${{ inputs.pr_body }}
           DRY_RUN: ${{ inputs.dry_run }}
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.PAT_TOKEN }}
           script: |
             const fs = require('fs');
             const path = require('path');
@@ -122,7 +128,7 @@ jobs:
                 }
 
                 // Clone the target repo
-                execSync(`git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${owner}/${repo}.git ${tmpDir}`, { stdio: 'inherit' });
+                execSync(`git clone https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/${owner}/${repo}.git ${tmpDir}`, { stdio: 'inherit' });
                 process.chdir(tmpDir);
 
                 // Create new branch
