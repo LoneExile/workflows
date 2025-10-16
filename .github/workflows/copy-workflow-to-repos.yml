@@ -102,7 +102,7 @@ jobs:
             await core.summary
               .addHeading('Copy Workflow Configuration', 2)
               .addList([
-                `Target repos: ${repos.map(r=>r.full).join(', ')}`,
+                `Target repos: ${repos.map(r=>r.name).join(', ')}`,
                 `Target path: ${targetPath}`,
                 `Dry run: ${dryRun}`
               ])
@@ -179,7 +179,7 @@ jobs:
               .addHeading('Copy Results')
               .addTable([
                 [{data:'Repo',header:true},{data:'Status',header:true},{data:'Details',header:true}],
-                ...results.map(r => [r.repo, r.status, r.pr || r.message || ''])
+                ...results.map(r => [r.repo.split('/')[1] || r.repo, r.status, r.pr || r.message || ''])
               ])
               .addRaw(`\nPRs Created: ${created}  |  Dry-run: ${would}  |  Errors: ${errors}\n`)
               .write();
