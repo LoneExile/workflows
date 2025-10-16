@@ -62,8 +62,6 @@ jobs:
             const fs = require('fs');
             const path = require('path');
 
-            const org = 'mtl-digitaltech';
-
             const wfInputs = (context.payload && context.payload.inputs) || {};
             const read = (k, d='') => (wfInputs[k] ?? process.env[k.toUpperCase()] ?? d);
 
@@ -98,7 +96,8 @@ jobs:
               const lower = x.toLowerCase();
               const p = lower.split('/');
               if (p.length === 2) return { owner: p[0], name: p[1], full: lower };
-              return { owner: org.toLowerCase(), name: lower, full: `${org.toLowerCase()}/${lower}` };
+              // If no owner specified, use the current repo owner as default
+              return { owner: context.repo.owner.toLowerCase(), name: lower, full: `${context.repo.owner.toLowerCase()}/${lower}` };
             });
 
             const repos = normalise(repoList);
