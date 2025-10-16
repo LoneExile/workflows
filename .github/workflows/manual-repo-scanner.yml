@@ -1,0 +1,209 @@
+name: Manual Repo Scanner
+
+on:
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: "Comma/whitespace-separated repo names (repo or owner/repo)"
+        required: true
+        type: string
+      scan_type:
+        description: "Type of scan to perform"
+        required: false
+        default: "gitleaks"
+        type: choice
+        options: ["gitleaks", "security", "all"]
+      pr_title:
+        description: "PR title"
+        required: false
+        default: "chore: security scan results"
+        type: string
+      pr_body:
+        description: "PR body"
+        required: false
+        default: "Automated security scan results and fixes."
+        type: string
+      dry_run:
+        description: "If true, only list actions without creating PRs"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.GITLEAKSCAN_ID }}
+          private-key: ${{ secrets.GITLEAKSCAN_PRIVATE_KEY }}
+
+      - name: Setup git config
+        run: |
+          git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/mtl-digitaltech/".insteadOf "https://github.com/mtl-digitaltech/"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install gitleaks
+        if: inputs.scan_type == 'gitleaks' || inputs.scan_type == 'all'
+        run: |
+          wget https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz
+          tar -xzf gitleaks_8.18.2_linux_x64.tar.gz
+          sudo mv gitleaks /usr/local/bin/
+          gitleaks version
+
+      - name: Scan repos and create PRs
+        uses: actions/github-script@v7
+        env:
+          REPOS: ${{ inputs.repos }}
+          SCAN_TYPE: ${{ inputs.scan_type }}
+          PR_TITLE: ${{ inputs.pr_title }}
+          PR_BODY: ${{ inputs.pr_body }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const { execSync } = require('child_process');
+
+            const org = 'mtl-digitaltech';
+
+            const wfInputs = (context.payload && context.payload.inputs) || {};
+            const read = (k, d='') => (wfInputs[k] ?? process.env[k.toUpperCase()] ?? d);
+
+            const splitList = (s) => String(s || '')
+              .split(/[\s,]+/)
+              .map(x => x.trim())
+              .filter(Boolean);
+
+            const repoList = splitList(read('repos', ''));
+            const scanType = read('scan_type', 'gitleaks');
+            const prTitle  = read('pr_title', 'chore: security scan results');
+            const prBody   = read('pr_body', 'Automated security scan results and fixes.');
+            const dryRun   = String(read('dry_run', 'false')) === 'true';
+
+            if (!repoList.length) {
+              core.setFailed('No repos specified');
+              process.exit(1);
+            }
+
+            const normalise = (arr) => arr.map(x => {
+              const lower = x.toLowerCase();
+              const p = lower.split('/');
+              if (p.length === 2) return { owner: p[0], name: p[1], full: lower };
+              return { owner: org.toLowerCase(), name: lower, full: `${org.toLowerCase()}/${lower}` };
+            });
+
+            const repos = normalise(repoList);
+
+            await core.summary
+              .addHeading('Scan Configuration', 2)
+              .addList([
+                `Repos to scan: ${repos.map(r=>r.full).join(', ')}`,
+                `Scan type: ${scanType}`,
+                `Dry run: ${dryRun}`
+              ])
+              .write();
+
+            const results = [];
+
+            for (const r of repos) {
+              const owner = r.owner;
+              const repo  = r.name;
+
+              try {
+                const repoData = await github.rest.repos.get({ owner, repo });
+                const base = repoData.data.default_branch || 'main';
+
+                const ts = new Date().toISOString().replace(/[:.]/g,'-');
+                const branch = `chore/security-scan-${ts}`;
+                const tmpDir = `/tmp/scan-${repo}-${ts}`;
+
+                if (dryRun) {
+                  results.push({ repo: r.full, status: 'would-scan', branch, base });
+                  continue;
+                }
+
+                execSync(`git clone https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/${owner}/${repo}.git ${tmpDir}`, { stdio: 'inherit' });
+                process.chdir(tmpDir);
+
+                let scanResults = '';
+                let hasIssues = false;
+
+                if (scanType === 'gitleaks' || scanType === 'all') {
+                  try {
+                    execSync('gitleaks detect --report-format json --report-path gitleaks-report.json', { stdio: 'pipe' });
+                  } catch (e) {
+                    if (fs.existsSync('gitleaks-report.json')) {
+                      const report = JSON.parse(fs.readFileSync('gitleaks-report.json', 'utf8'));
+                      if (report.length > 0) {
+                        hasIssues = true;
+                        scanResults += `## Gitleaks Scan Results\n\nFound ${report.length} potential secret(s):\n\n`;
+                        report.slice(0, 10).forEach((finding, i) => {
+                          scanResults += `${i+1}. **${finding.RuleID}** in \`${finding.File}\` (line ${finding.StartLine})\n`;
+                        });
+                        if (report.length > 10) scanResults += `\n... and ${report.length - 10} more\n`;
+                      }
+                    }
+                  }
+                }
+
+                if (!hasIssues) {
+                  results.push({ repo: r.full, status: 'clean', message: 'No issues found' });
+                  execSync(`rm -rf ${tmpDir}`);
+                  continue;
+                }
+
+                execSync(`git checkout -b ${branch}`);
+                
+                const reportFile = 'SECURITY_SCAN_REPORT.md';
+                fs.writeFileSync(reportFile, `# Security Scan Report\n\nGenerated: ${new Date().toISOString()}\n\n${scanResults}`);
+                
+                execSync(`git add ${reportFile}`);
+                execSync(`git config user.name "Security Scanner Bot"`);
+                execSync(`git config user.email "security-scanner@github.com"`);
+                execSync(`git commit -m "${prTitle}"`);
+                execSync(`git push origin ${branch}`);
+
+                const pr = await github.rest.pulls.create({
+                  owner,
+                  repo,
+                  title: prTitle,
+                  head: branch,
+                  base,
+                  body: `${prBody}\n\n${scanResults}`
+                });
+
+                results.push({ repo: r.full, status: 'pr-created', pr: pr.data.html_url });
+
+                execSync(`rm -rf ${tmpDir}`);
+
+              } catch (e) {
+                const msg = e?.message?.split('\n')[0] || String(e);
+                results.push({ repo: r.full, status: 'error', message: msg });
+              }
+            }
+
+            const created = results.filter(r => r.status === 'pr-created').length;
+            const clean   = results.filter(r => r.status === 'clean').length;
+            const would   = results.filter(r => r.status === 'would-scan').length;
+            const errors  = results.filter(r => r.status === 'error').length;
+
+            await core.summary
+              .addHeading('Scan Results')
+              .addTable([
+                [{data:'Repo',header:true},{data:'Status',header:true},{data:'Details',header:true}],
+                ...results.map(r => [r.repo, r.status, r.pr || r.message || ''])
+              ])
+              .addRaw(`\nPRs Created: ${created}  |  Clean: ${clean}  |  Dry-run: ${would}  |  Errors: ${errors}\n`)
+              .write();
